@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mini Coding Agent</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">&lt;/&gt;</div>
+        <div>
+          <strong>Mini Coding Agent</strong>
+          <span>Local workspace</span>
+        </div>
+      </div>
+      <button class="new-task" id="newTask">+ 新建对话</button>
+      <label class="project-label" for="projectSelect">当前项目</label>
+      <select id="projectSelect" class="project-select"></select>
+      <div class="history-heading">
+        <span>对话历史</span>
+        <span class="history-count" id="historyCount">0</span>
+      </div>
+      <div class="history-list" id="historyList"></div>
+      <div class="sidebar-footer">
+        <span class="status-dot"></span>
+        <span>本地 Agent 在线</span>
+      </div>
+    </aside>
+
+    <main class="main-panel">
+      <header class="topbar">
+        <div>
+          <span class="eyebrow">CODING SESSION</span>
+          <h1>编程工作台</h1>
+        </div>
+        <div class="connection"><span class="status-dot"></span> DashScope / Qwen</div>
+      </header>
+
+      <section class="conversation" id="conversation">
+        <div class="empty-state" id="emptyState">
+          <div class="empty-icon">&lt;_</div>
+          <h2>把编程任务交给 Agent</h2>
+          <p>它会在当前项目中读取文件、修改代码并运行命令。</p>
+        </div>
+      </section>
+
+      <form class="composer" id="taskForm">
+        <textarea id="taskInput" rows="3" placeholder="描述你想完成的编程任务..." required></textarea>
+        <div class="composer-bar">
+          <span class="scope-label" id="scopeLabel">workspace/</span>
+          <button class="send-button" id="sendButton" type="submit">
+            <span>执行任务</span><span class="send-arrow">→</span>
+          </button>
+        </div>
+      </form>
+    </main>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>

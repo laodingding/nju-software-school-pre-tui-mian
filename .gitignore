@@ -1,0 +1,6 @@
+config.json
+data/
+__pycache__/
+*.py[cod]
+workspace/*
+!workspace/README.md
