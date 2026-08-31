@@ -22,13 +22,15 @@ class LLMClient:
         self.enable_thinking = bool(config.get("enable_thinking", False))
 
     def chat(self, messages, tools):
-        completion = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            tools=tools,
-            tool_choice="auto",
-            extra_body={"enable_thinking": self.enable_thinking},
-        )
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "extra_body": {"enable_thinking": self.enable_thinking},
+        }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+        completion = self.client.chat.completions.create(**payload)
         # Convert the SDK message object into the plain dict format expected
         # by agent.py, preserving tool calls and their JSON arguments.
         return completion.choices[0].message.model_dump(exclude_none=True)

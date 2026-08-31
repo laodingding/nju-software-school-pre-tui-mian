@@ -1,13 +1,12 @@
 import json
-import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from agent import CodingAgent
 from history import SessionStore
 from llm import LLMClient
+from multi_agent import MultiAgentOrchestrator
 from projects import ProjectManager
 from tools import WorkspaceTools
 
@@ -41,7 +40,7 @@ class App:
         else:
             store.get_conversation(conversation_id)
         tools = WorkspaceTools(project_path)
-        agent = CodingAgent(
+        agent = MultiAgentOrchestrator(
             client=self.client,
             tools=tools,
             messages=store.get_messages(conversation_id),
@@ -60,6 +59,16 @@ def make_handler(app):
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _send_file(self, path, content_type):
+            if not path.is_file():
+                return self._send_json({"error": "Frontend file not found"}, 500)
+            body = path.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", f"{content_type}; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -83,7 +92,10 @@ def make_handler(app):
                     app.project_manager.get_project(project_name)
                     store = SessionStore(f"data/projects/{project_name}.json")
                     return self._send_json(
-                        {"project": project_name, "conversations": store.list_conversations()}
+                        {
+                            "project": project_name,
+                            "conversations": store.list_conversations(),
+                        }
                     )
                 except ValueError as exc:
                     return self._send_json({"error": str(exc)}, 400)
@@ -98,17 +110,7 @@ def make_handler(app):
                     return self._send_json(store.public_history(conversation_id))
                 except (KeyError, ValueError) as exc:
                     return self._send_json({"error": str(exc)}, 400)
-            self._send_json({"error": "Not found"}, 404)
-
-        def _send_file(self, path, content_type):
-            if not path.is_file():
-                return self._send_json({"error": "Frontend file not found"}, 500)
-            body = path.read_bytes()
-            self.send_response(200)
-            self.send_header("Content-Type", f"{content_type}; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            return self._send_json({"error": "Not found"}, 404)
 
         def do_POST(self):
             path = urlparse(self.path).path
@@ -120,31 +122,36 @@ def make_handler(app):
                 project_name = str(payload.get("project", "")).strip()
                 if not project_name:
                     return self._send_json({"error": "Project is required"}, 400)
-                if path == "/api/conversations":
-                    title = str(payload.get("title", "")).strip() or "新对话"
-                    try:
-                        app.project_manager.get_project(project_name)
-                    except ValueError as exc:
-                        return self._send_json({"error": str(exc)}, 400)
-                    store = SessionStore(f"data/projects/{project_name}.json")
-                    conversation_id = store.create_conversation(title)
-                    return self._send_json(
-                        {
-                            "project": project_name,
-                            "conversation_id": conversation_id,
-                            "title": title,
-                        }
-                    )
-                task = str(payload.get("task", "")).strip()
-                conversation_id = str(payload.get("conversation_id", "")).strip()
-                if not task:
-                    return self._send_json({"error": "Task cannot be empty"}, 400)
-                if not conversation_id:
-                    return self._send_json(
-                        {"error": "Conversation is required"}, 400
-                    )
             except (ValueError, json.JSONDecodeError):
                 return self._send_json({"error": "Invalid JSON request"}, 400)
+
+            if path == "/api/conversations":
+                return self._create_conversation(project_name, payload)
+            return self._run_task(project_name, payload)
+
+        def _create_conversation(self, project_name, payload):
+            title = str(payload.get("title", "")).strip() or "New conversation"
+            try:
+                app.project_manager.get_project(project_name)
+                store = SessionStore(f"data/projects/{project_name}.json")
+                conversation_id = store.create_conversation(title)
+                return self._send_json(
+                    {
+                        "project": project_name,
+                        "conversation_id": conversation_id,
+                        "title": title,
+                    }
+                )
+            except ValueError as exc:
+                return self._send_json({"error": str(exc)}, 400)
+
+        def _run_task(self, project_name, payload):
+            task = str(payload.get("task", "")).strip()
+            conversation_id = str(payload.get("conversation_id", "")).strip()
+            if not task:
+                return self._send_json({"error": "Task cannot be empty"}, 400)
+            if not conversation_id:
+                return self._send_json({"error": "Conversation is required"}, 400)
 
             if not app.run_lock.acquire(blocking=False):
                 return self._send_json({"error": "Another task is already running"}, 409)
@@ -153,14 +160,14 @@ def make_handler(app):
                 store, conversation_id, agent = app.project_context(
                     project_name, conversation_id
                 )
-            except (KeyError, ValueError) as exc:
+                run_id = store.begin_run(
+                    conversation_id, task, project=project_name
+                )
+            except (KeyError, OSError, ValueError) as exc:
                 app.run_lock.release()
                 return self._send_json({"error": str(exc)}, 400)
 
             try:
-                run_id = store.begin_run(
-                    conversation_id, task, project=project_name
-                )
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream; charset=utf-8")
                 self.send_header("Cache-Control", "no-cache")
@@ -175,8 +182,6 @@ def make_handler(app):
                         store.add_event(conversation_id, run_id, event)
                         store.save_messages(conversation_id, agent.messages)
                     except OSError as exc:
-                        # History is useful, but a temporary file lock must not
-                        # turn a successful coding task into a failed task.
                         print(
                             f"[history] save skipped: {type(exc).__name__}: {exc}"
                         )
@@ -208,14 +213,13 @@ def make_handler(app):
                 send_event({"type": "done", "run_id": run_id, "status": status})
             except Exception as exc:
                 error = f"{type(exc).__name__}: {exc}"
-                if "run_id" in locals():
-                    try:
-                        store.finish_run(conversation_id, run_id, "error", error)
-                    except OSError as save_exc:
-                        print(
-                            f"[history] error save skipped: "
-                            f"{type(save_exc).__name__}: {save_exc}"
-                        )
+                try:
+                    store.finish_run(conversation_id, run_id, "error", error)
+                except OSError as save_exc:
+                    print(
+                        f"[history] error save skipped: "
+                        f"{type(save_exc).__name__}: {save_exc}"
+                    )
                 if "send_event" in locals():
                     send_event({"type": "error", "message": error})
                     send_event(
@@ -243,8 +247,8 @@ def main():
         server = ThreadingHTTPServer((args.host, args.port), make_handler(app))
     except OSError as exc:
         raise SystemExit(
-            f"无法启动 Web 服务：端口 {args.port} 已被占用。"
-            "请关闭已有的 main.py --web 进程，或使用 --port 指定其他端口。"
+            f"Cannot start web server: port {args.port} is already in use. "
+            "Stop the existing main.py --web process or choose another port."
         ) from exc
     print(f"Mini Coding Agent UI: http://{args.host}:{args.port}")
     try:

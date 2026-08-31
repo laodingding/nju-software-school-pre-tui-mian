@@ -33,6 +33,7 @@ function addElement(className, text = "") {
 
 function renderEvent(event) {
   if (emptyState.parentElement) emptyState.remove();
+
   if (event.type === "task") {
     const message = addElement("message user");
     const bubble = document.createElement("div");
@@ -41,37 +42,55 @@ function renderEvent(event) {
     message.appendChild(bubble);
     return;
   }
+
+  if (event.type === "agent_decision") {
+    const item = addElement("event agent-decision");
+    item.innerHTML = `<div class="event-head"><span class="tag">ROUTE</span> ${escapeHtml(event.mode)}</div><div class="event-body">${escapeHtml(event.reason || "")}</div>`;
+    return;
+  }
+
+  if (event.type === "agent_phase") {
+    const item = addElement("event agent-phase");
+    item.innerHTML = `<div class="event-head"><span class="tag">AGENT</span> ${escapeHtml(event.agent)} · ${escapeHtml(event.title)}</div>`;
+    return;
+  }
+
   if (event.type === "step") {
     const item = addElement("event");
-    item.innerHTML = `<div class="event-head"><span class="tag">STEP</span> Agent 正在分析第 ${event.step} 步</div>`;
+    item.innerHTML = `<div class="event-head"><span class="tag">STEP</span> ${escapeHtml(event.agent || "agent")} analyzing step ${event.step}</div>`;
     return;
   }
+
   if (event.type === "model_waiting") {
     const item = addElement("event model-waiting");
-    item.innerHTML = `<div class="event-head"><span class="tag">MODEL</span> ${escapeHtml(event.message)}</div>`;
+    item.innerHTML = `<div class="event-head"><span class="tag">MODEL</span> ${escapeHtml(event.agent || "agent")} · ${escapeHtml(event.message)}</div>`;
     return;
   }
+
   if (event.type === "tool_start") {
     const item = addElement("event tool");
     const args = typeof event.arguments === "string"
       ? event.arguments
       : JSON.stringify(event.arguments, null, 2);
-    item.innerHTML = `<div class="event-head"><span class="tag">TOOL</span> 调用 ${escapeHtml(event.name)}</div><div class="event-body">${escapeHtml(args)}</div>`;
+    item.innerHTML = `<div class="event-head"><span class="tag">TOOL</span> ${escapeHtml(event.agent || "agent")} calls ${escapeHtml(event.name)}</div><div class="event-body">${escapeHtml(args)}</div>`;
     return;
   }
+
   if (event.type === "tool_result") {
     const item = addElement(`event ${event.ok === false ? "tool" : "code"}`);
-    item.innerHTML = `<div class="event-head"><span class="tag">RESULT</span> ${escapeHtml(event.name)} 返回</div><div class="event-body">${escapeHtml(event.result || "")}</div>`;
+    item.innerHTML = `<div class="event-head"><span class="tag">RESULT</span> ${escapeHtml(event.agent || "agent")} · ${escapeHtml(event.name)}</div><div class="event-body">${escapeHtml(event.result || "")}</div>`;
     return;
   }
+
   if (event.type === "assistant") {
     const item = addElement("assistant");
-    item.textContent = event.content || "";
+    item.textContent = event.agent ? `[${event.agent}]\n${event.content || ""}` : event.content || "";
     return;
   }
+
   if (event.type === "error") {
     const item = addElement("event tool");
-    item.innerHTML = `<div class="event-head"><span class="tag">ERROR</span> 执行失败</div><div class="event-body">${escapeHtml(event.message)}</div>`;
+    item.innerHTML = `<div class="event-head"><span class="tag">ERROR</span> ${escapeHtml(event.agent || "agent")} failed</div><div class="event-body">${escapeHtml(event.message)}</div>`;
   }
 }
 
@@ -96,8 +115,8 @@ function formatDate(value) {
 }
 
 function statusText(conversationItem) {
-  if (!conversationItem.run_count) return "空对话";
-  return `${conversationItem.run_count} 次任务`;
+  if (!conversationItem.run_count) return "empty";
+  return `${conversationItem.run_count} task(s)`;
 }
 
 function renderConversations() {
@@ -115,14 +134,14 @@ function renderConversations() {
   });
 }
 
-async function createConversation(title = "新对话") {
+async function createConversation(title = "New conversation") {
   const response = await fetch("/api/conversations", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ project: projectSelect.value, title })
   });
   const data = await response.json();
-  if (!response.ok) throw new Error(data.error || "创建对话失败");
+  if (!response.ok) throw new Error(data.error || "Failed to create conversation");
   activeConversationId = data.conversation_id;
   localStorage.setItem(projectStorageKey(), activeConversationId);
   await loadConversations(false);
@@ -133,7 +152,7 @@ async function loadConversations(loadActiveHistory = true) {
     `/api/conversations?project=${encodeURIComponent(projectSelect.value)}`
   );
   const data = await response.json();
-  if (!response.ok) throw new Error(data.error || "读取对话列表失败");
+  if (!response.ok) throw new Error(data.error || "Failed to load conversations");
   conversations = data.conversations || [];
 
   const savedId = localStorage.getItem(projectStorageKey());
@@ -169,7 +188,7 @@ async function loadConversationHistory() {
   });
   const response = await fetch(`/api/history?${query.toString()}`);
   const data = await response.json();
-  if (!response.ok) throw new Error(data.error || "读取对话历史失败");
+  if (!response.ok) throw new Error(data.error || "Failed to load history");
   clearConversation();
   (data.runs || []).forEach((run) => (run.events || []).forEach(renderEvent));
 }
@@ -177,7 +196,7 @@ async function loadConversationHistory() {
 async function loadProjects() {
   const response = await fetch("/api/projects");
   const data = await response.json();
-  if (!response.ok) throw new Error(data.error || "读取项目失败");
+  if (!response.ok) throw new Error(data.error || "Failed to load projects");
   projects = data.projects || [];
   projectSelect.innerHTML = "";
   projects.forEach((project) => {
@@ -214,7 +233,7 @@ async function runTask(task) {
   });
   if (!response.ok) {
     const error = await response.json();
-    throw new Error(error.error || "任务启动失败");
+    throw new Error(error.error || "Failed to start task");
   }
 
   const reader = response.body.getReader();

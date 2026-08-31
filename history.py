@@ -41,7 +41,6 @@ class SessionStore:
             state["conversations"] = conversations if isinstance(conversations, dict) else {}
             return state
 
-        # Migrate the previous one-conversation-per-project format.
         messages = state.get("messages", [])
         runs = state.get("runs", [])
         conversation_id = "legacy-" + uuid.uuid4().hex
@@ -49,7 +48,7 @@ class SessionStore:
             "conversations": {
                 conversation_id: {
                     "id": conversation_id,
-                    "title": "历史对话",
+                    "title": "Legacy conversation",
                     "created_at": now_iso(),
                     "updated_at": now_iso(),
                     "messages": messages if isinstance(messages, list) else [],
@@ -91,13 +90,13 @@ class SessionStore:
     def _conversations(self):
         return self.state.setdefault("conversations", {})
 
-    def create_conversation(self, title="新对话"):
+    def create_conversation(self, title="New conversation"):
         with self.lock:
             conversation_id = uuid.uuid4().hex
             timestamp = now_iso()
             self._conversations()[conversation_id] = {
                 "id": conversation_id,
-                "title": title or "新对话",
+                "title": title or "New conversation",
                 "created_at": timestamp,
                 "updated_at": timestamp,
                 "messages": [],
@@ -121,7 +120,7 @@ class SessionStore:
                 conversations.append(
                     {
                         "id": conversation["id"],
-                        "title": conversation.get("title") or "新对话",
+                        "title": conversation.get("title") or "New conversation",
                         "created_at": conversation.get("created_at"),
                         "updated_at": conversation.get("updated_at"),
                         "run_count": len(runs),
@@ -135,7 +134,7 @@ class SessionStore:
             )
 
     def recover_incomplete_runs(self):
-        """Mark tasks left running by a crashed/restarted server as interrupted."""
+        """Mark tasks left running by a crashed server as interrupted."""
         with self.lock:
             changed = False
             for conversation in self._conversations().values():
@@ -144,13 +143,16 @@ class SessionStore:
                     if run.get("status") == "running":
                         run["status"] = "interrupted"
                         run["answer"] = (
-                            "任务因服务异常或重启而中断，未继续执行。"
+                            "Task was interrupted because the service restarted."
                         )
                         run["finished_at"] = now_iso()
                         run.setdefault("events", []).append(
                             {
                                 "type": "error",
-                                "message": "服务重启，已结束上一次未完成任务。",
+                                "message": (
+                                    "Service restarted; the previous unfinished "
+                                    "task was marked as interrupted."
+                                ),
                             }
                         )
                         changed = True
@@ -184,7 +186,10 @@ class SessionStore:
                 "events": [],
             }
             conversation.setdefault("runs", []).append(run)
-            if not conversation.get("title") or conversation["title"] == "新对话":
+            if (
+                not conversation.get("title")
+                or conversation["title"] == "New conversation"
+            ):
                 conversation["title"] = task[:40]
             conversation["updated_at"] = now_iso()
             self._save()

@@ -72,6 +72,8 @@ h1 { margin: 7px 0 0; font-size: 25px; letter-spacing: 0; }
 .user-bubble { max-width: 75%; padding: 12px 15px; color: white; background: var(--teal); font-size: 14px; line-height: 1.6; }
 .event { margin: 10px 0; border: 1px solid var(--line); background: var(--panel); }
 .event.model-waiting { border-left: 3px solid #7b8c98; }
+.event.agent-decision { border-left: 3px solid var(--teal); }
+.event.agent-phase { border-left: 3px solid #5b6fbd; }
 .event-head { display: flex; align-items: center; gap: 9px; padding: 9px 12px; border-bottom: 1px solid var(--line); font-size: 12px; font-weight: 700; }
 .event-head .tag { color: var(--teal); font-family: ui-monospace, monospace; font-size: 10px; }
 .event-body { padding: 12px; color: #465663; font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-x: auto; }

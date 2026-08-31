@@ -1,6 +1,6 @@
 import argparse
-from agent import CodingAgent
 from llm import LLMClient
+from multi_agent import MultiAgentOrchestrator
 from tools import WorkspaceTools
 
 
@@ -48,7 +48,7 @@ def main():
 
     tools = WorkspaceTools(args.workspace)
     client = LLMClient()
-    agent = CodingAgent(client=client, tools=tools)
+    agent = MultiAgentOrchestrator(client=client, tools=tools)
 
     if task:
         agent.run(task)
