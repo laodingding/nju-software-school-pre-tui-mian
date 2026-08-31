@@ -1,6 +1,12 @@
 import os
 import subprocess
+import time
+import threading
 from pathlib import Path
+
+
+class ToolCancelled(Exception):
+    pass
 
 
 class WorkspaceTools:
@@ -9,6 +15,8 @@ class WorkspaceTools:
     def __init__(self, workspace):
         self.root = Path(workspace).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
+        self._process_lock = threading.Lock()
+        self._active_processes = set()
 
     def _safe_path(self, path):
         candidate = (self.root / path).resolve()
@@ -39,19 +47,85 @@ class WorkspaceTools:
         file_path.write_text(content, encoding="utf-8")
         return f"Wrote {file_path.relative_to(self.root)} ({len(content)} characters)."
 
-    def run_command(self, command):
-        completed = subprocess.run(
+    def _register_process(self, process):
+        with self._process_lock:
+            self._active_processes.add(process)
+
+    def _unregister_process(self, process):
+        with self._process_lock:
+            self._active_processes.discard(process)
+
+    def _terminate_process(self, process):
+        if process.poll() is not None:
+            return
+        try:
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+            else:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
+
+    def terminate_active_processes(self):
+        with self._process_lock:
+            active = list(self._active_processes)
+        for process in active:
+            self._terminate_process(process)
+
+    def run_command(self, command, should_cancel=None):
+        process = subprocess.Popen(
             command,
             cwd=self.root,
             shell=True,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=30,
         )
-        output = (completed.stdout + completed.stderr).strip()
-        if len(output) > 12000:
-            output = output[:12000] + "\n...[output truncated]"
-        return f"exit_code={completed.returncode}\n{output or '(no output)'}"
+        self._register_process(process)
+        timeout_seconds = 30
+        deadline = time.monotonic() + timeout_seconds
+        try:
+            while True:
+                if should_cancel and should_cancel():
+                    self._terminate_process(process)
+                    raise ToolCancelled("Command cancelled by user.")
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._terminate_process(process)
+                    stdout, stderr = process.communicate()
+                    output = (stdout + stderr).strip()
+                    if len(output) > 12000:
+                        output = output[:12000] + "\n...[output truncated]"
+                    return (
+                        "exit_code=124\n"
+                        f"{output or '(command timed out after 30 seconds)'}"
+                    )
+
+                try:
+                    stdout, stderr = process.communicate(timeout=min(0.2, remaining))
+                    output = (stdout + stderr).strip()
+                    if len(output) > 12000:
+                        output = output[:12000] + "\n...[output truncated]"
+                    return f"exit_code={process.returncode}\n{output or '(no output)'}"
+                except subprocess.TimeoutExpired:
+                    continue
+        finally:
+            self._unregister_process(process)
+            if process.poll() is None:
+                self._terminate_process(process)
 
     def definitions(self):
         return [
@@ -108,7 +182,7 @@ class WorkspaceTools:
             },
         ]
 
-    def call(self, name, arguments):
+    def call(self, name, arguments, should_cancel=None):
         if name == "list_files":
             return self.list_files(arguments.get("path", "."))
         if name == "read_file":
@@ -116,5 +190,8 @@ class WorkspaceTools:
         if name == "write_file":
             return self.write_file(arguments["path"], arguments["content"])
         if name == "run_command":
-            return self.run_command(arguments["command"])
+            return self.run_command(
+                arguments["command"],
+                should_cancel=should_cancel,
+            )
         raise ValueError(f"Unknown tool: {name}")

@@ -1,5 +1,7 @@
 import json
 
+from tools import ToolCancelled
+
 
 SYSTEM_PROMPT = """You are a careful coding agent.
 You work only inside the provided workspace.
@@ -14,94 +16,133 @@ When finished, briefly summarize what changed and what you tested.
 
 
 class CodingAgent:
-    def __init__(self, client, tools, messages=None):
+    def __init__(self, client, tools, messages=None, system_prompt=None, agent_name=None):
         self.client = client
         self.tools = tools
-        self.messages = messages or [{"role": "system", "content": SYSTEM_PROMPT}]
+        self.agent_name = agent_name or "coding-agent"
+        self.messages = messages or [
+            {"role": "system", "content": system_prompt or SYSTEM_PROMPT}
+        ]
         self.last_status = "idle"
 
     def _finish(self, answer, status, emit):
         self.last_status = status
-        emit("assistant", content=answer)
+        emit("assistant", agent=self.agent_name, content=answer)
         return answer
 
-    def run(self, task, on_event=None):
+    def run(self, task, on_event=None, emit_task=True, should_cancel=None):
         def emit(event_type, **data):
             event = {"type": event_type, **data}
             if on_event:
                 on_event(event)
 
+        def cancelled():
+            return bool(should_cancel and should_cancel())
+
         self.last_status = "running"
         self.messages.append({"role": "user", "content": task})
-        emit("task", task=task)
+        if emit_task:
+            emit("task", task=task)
         print(f"\nTask: {task}")
         step = 0
 
-        # The loop ends when the model returns a normal answer or an
-        # unrecoverable model/tool error occurs. There is intentionally no
-        # arbitrary maximum-step cutoff.
         while True:
+            if cancelled():
+                emit("cancelled", agent=self.agent_name, message="Cancelled by user.")
+                return self._finish("Task cancelled by user.", "cancelled", emit)
+
             step += 1
-            emit("step", step=step)
-            emit("model_waiting", message="正在等待模型响应...")
-            print(f"\n[step {step}] thinking...")
+            emit("step", agent=self.agent_name, step=step)
+            emit(
+                "model_waiting",
+                agent=self.agent_name,
+                message="Waiting for model response...",
+            )
+            print(f"\n[{self.agent_name} step {step}] thinking...")
             try:
                 message = self.client.chat(self.messages, self.tools.definitions())
             except Exception as exc:
                 reason = f"{type(exc).__name__}: {exc}"
-                emit("error", message=reason)
+                emit("error", agent=self.agent_name, message=reason)
                 return self._finish(
-                    f"任务无法继续，原因：{reason}",
+                    f"Task cannot continue. Reason: {reason}",
                     "error",
                     emit,
                 )
+
+            if cancelled():
+                emit("cancelled", agent=self.agent_name, message="Cancelled by user.")
+                return self._finish("Task cancelled by user.", "cancelled", emit)
 
             self.messages.append(message)
             tool_calls = message.get("tool_calls") or []
             if not tool_calls:
                 answer = message.get("content")
                 if not answer:
-                    reason = "模型返回了空消息，无法继续执行。"
-                    emit("error", message=reason)
+                    reason = "The model returned an empty message."
+                    emit("error", agent=self.agent_name, message=reason)
                     return self._finish(
-                        f"任务无法继续，原因：{reason}",
+                        f"Task cannot continue. Reason: {reason}",
                         "error",
                         emit,
                     )
                 if answer.strip().upper().startswith("UNSUPPORTED:"):
-                    reason = answer.split(":", 1)[1].strip() or "现有工具无法解决此任务。"
-                    emit("error", message=reason)
+                    reason = answer.split(":", 1)[1].strip() or (
+                        "The available tools cannot solve this task."
+                    )
+                    emit("error", agent=self.agent_name, message=reason)
                     return self._finish(
-                        f"任务已结束，现有工具无法完成。\n原因：{reason}",
+                        "Task ended because the available tools cannot complete it.\n"
+                        f"Reason: {reason}",
                         "error",
                         emit,
                     )
                 return self._finish(answer, "completed", emit)
 
             for tool_call in tool_calls:
+                if cancelled():
+                    emit("cancelled", agent=self.agent_name, message="Cancelled by user.")
+                    return self._finish("Task cancelled by user.", "cancelled", emit)
+
                 function = tool_call.get("function") or {}
                 name = function.get("name", "")
                 arguments_text = function.get("arguments") or "{}"
                 arguments = {}
-                emit("tool_start", name=name, arguments=arguments_text)
+                emit(
+                    "tool_start",
+                    agent=self.agent_name,
+                    name=name,
+                    arguments=arguments_text,
+                )
 
                 try:
                     if not name:
-                        raise ValueError("模型没有提供工具名称")
+                        raise ValueError("The model did not provide a tool name.")
                     arguments = json.loads(arguments_text)
                     if not isinstance(arguments, dict):
-                        raise ValueError("工具参数必须是 JSON 对象")
-                    result = self.tools.call(name, arguments)
+                        raise ValueError("Tool arguments must be a JSON object.")
+                    result = self.tools.call(
+                        name,
+                        arguments,
+                        should_cancel=should_cancel,
+                    )
+                except ToolCancelled:
+                    emit("cancelled", agent=self.agent_name, message="Cancelled by user.")
+                    return self._finish("Task cancelled by user.", "cancelled", emit)
                 except Exception as exc:
-                    reason = f"工具 {name or '(unknown)'} 执行失败：{type(exc).__name__}: {exc}"
+                    reason = (
+                        f"Tool {name or '(unknown)'} failed: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
                     emit(
                         "tool_result",
+                        agent=self.agent_name,
                         name=name or "(unknown)",
                         arguments=arguments,
                         result=reason,
                         ok=False,
                     )
-                    emit("error", message=reason)
+                    emit("error", agent=self.agent_name, message=reason)
                     self.messages.append(
                         {
                             "role": "tool",
@@ -110,13 +151,15 @@ class CodingAgent:
                         }
                     )
                     return self._finish(
-                        f"任务已结束，Agent 无法使用现有工具继续完成。\n原因：{reason}",
+                        "Task ended because the agent cannot continue with the "
+                        f"available tools.\nReason: {reason}",
                         "error",
                         emit,
                     )
 
                 emit(
                     "tool_result",
+                    agent=self.agent_name,
                     name=name,
                     arguments=arguments,
                     result=result,
