@@ -5,12 +5,17 @@ const historyCount = document.querySelector("#historyCount");
 const form = document.querySelector("#taskForm");
 const taskInput = document.querySelector("#taskInput");
 const sendButton = document.querySelector("#sendButton");
+const sendButtonLabel = sendButton.querySelector("span");
+const forceStopButton = document.querySelector("#forceStopButton");
 const projectSelect = document.querySelector("#projectSelect");
 const scopeLabel = document.querySelector("#scopeLabel");
 
 let conversations = [];
 let projects = [];
 let activeConversationId = null;
+let isRunning = false;
+let cancelRequested = false;
+let currentRunSnapshot = null;
 
 function projectStorageKey() {
   return `activeConversation:${projectSelect.value}`;
@@ -31,6 +36,11 @@ function addElement(className, text = "") {
   return element;
 }
 
+function finishRunningState() {
+  if (!isRunning) return;
+  setRunningState(false);
+}
+
 function renderEvent(event) {
   if (emptyState.parentElement) emptyState.remove();
 
@@ -40,6 +50,12 @@ function renderEvent(event) {
     bubble.className = "user-bubble";
     bubble.textContent = event.task;
     message.appendChild(bubble);
+    return;
+  }
+
+  if (event.type === "run_started") {
+    const item = addElement("event run-started");
+    item.innerHTML = `<div class="event-head"><span class="tag">RUN</span> 任务已开始</div><div class="event-body">${escapeHtml(event.task || "")}</div>`;
     return;
   }
 
@@ -88,9 +104,44 @@ function renderEvent(event) {
     return;
   }
 
+  if (event.type === "runtime_state") {
+    const item = addElement("event run-started");
+    item.innerHTML = `<div class="event-head"><span class="tag">STATE</span> ${escapeHtml(event.title || "当前任务已恢复")}</div><div class="event-body">${escapeHtml(event.message || "")}</div>`;
+    return;
+  }
+
   if (event.type === "error") {
     const item = addElement("event tool");
     item.innerHTML = `<div class="event-head"><span class="tag">ERROR</span> ${escapeHtml(event.agent || "agent")} failed</div><div class="event-body">${escapeHtml(event.message)}</div>`;
+    finishRunningState();
+    return;
+  }
+
+  if (event.type === "cancel_requested") {
+    const item = addElement("event cancelled");
+    item.innerHTML = `<div class="event-head"><span class="tag">CANCEL</span> 已请求终止</div><div class="event-body">${escapeHtml(event.message || "")}</div>`;
+    return;
+  }
+
+  if (event.type === "force_stopped") {
+    const item = addElement("event cancelled");
+    item.innerHTML = `<div class="event-head"><span class="tag">STOP</span> 已强制停止</div><div class="event-body">${escapeHtml(event.message || "")}</div>`;
+    finishRunningState();
+    return;
+  }
+
+  if (event.type === "cancelled") {
+    const item = addElement("event cancelled");
+    item.innerHTML = `<div class="event-head"><span class="tag">CANCEL</span> ${escapeHtml(event.agent || "agent")} stopped</div><div class="event-body">${escapeHtml(event.message || "Cancelled by user.")}</div>`;
+    finishRunningState();
+    return;
+  }
+
+  if (event.type === "done") {
+    const status = (event.status || "completed").toLowerCase();
+    const item = addElement(`event done done-${status}`);
+    item.innerHTML = `<div class="event-head"><span class="tag">DONE</span> 任务${escapeHtml(statusLabel(status))}</div><div class="event-body">${escapeHtml(event.status || "")}</div>`;
+    finishRunningState();
   }
 }
 
@@ -102,6 +153,14 @@ function escapeHtml(value) {
     '"': "&quot;",
     "'": "&#039;"
   }[char]));
+}
+
+function statusLabel(status) {
+  const value = String(status || "").toLowerCase();
+  if (value === "completed") return "已完成";
+  if (value === "cancelled") return "已终止";
+  if (value === "error") return "已失败";
+  return value || "unknown";
 }
 
 function formatDate(value) {
@@ -129,7 +188,10 @@ function renderConversations() {
       <div class="history-task">${escapeHtml(item.title)}</div>
       <div class="history-meta">${statusText(item)} · ${formatDate(item.updated_at)}</div>
     `;
-    button.addEventListener("click", () => selectConversation(item.id));
+    button.addEventListener("click", () => {
+      if (isRunning) return;
+      selectConversation(item.id);
+    });
     historyList.appendChild(button);
   });
 }
@@ -210,30 +272,169 @@ async function loadProjects() {
     projectSelect.value = savedProject;
   }
   updateProjectLabel();
-  if (projectSelect.value) await loadConversations();
+}
+
+async function loadRuntimeState() {
+  const response = await fetch("/api/current-run");
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Failed to load runtime state");
+  currentRunSnapshot = data.current_run || null;
+  if (!currentRunSnapshot) return false;
+
+  const runningProject = currentRunSnapshot.project || projectSelect.value;
+  if (runningProject && projectSelect.value !== runningProject) {
+    projectSelect.value = runningProject;
+    localStorage.setItem("selectedProject", runningProject);
+    updateProjectLabel();
+  }
+
+  activeConversationId = currentRunSnapshot.conversation_id || null;
+  if (activeConversationId) {
+    localStorage.setItem(projectStorageKey(), activeConversationId);
+  }
+  return true;
 }
 
 function updateProjectLabel() {
   scopeLabel.textContent = `workspace/${projectSelect.value || ""}`;
 }
 
+function setRunningState(running) {
+  isRunning = running;
+  cancelRequested = false;
+  sendButton.disabled = false;
+  sendButton.classList.toggle("running", running);
+  sendButtonLabel.textContent = running ? "执行中" : "执行任务";
+  sendButton.title = running ? "点击终止当前任务" : "";
+  forceStopButton.disabled = !running;
+  taskInput.disabled = running;
+  projectSelect.disabled = running;
+  document.querySelector("#newTask").disabled = running;
+}
+
+async function cancelTask() {
+  if (!isRunning || cancelRequested) return;
+  cancelRequested = true;
+  sendButtonLabel.textContent = "终止中";
+  renderEvent({
+    type: "cancel_requested",
+    agent: "user",
+    message: "已发送终止请求，当前模型调用会在下一个安全检查点停止。"
+  });
+  try {
+    const response = await fetch("/api/cancel", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({})
+    });
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.error || "Failed to cancel task");
+    }
+  } catch (error) {
+    renderEvent({ type: "error", agent: "ui", message: error.message });
+    cancelRequested = false;
+    if (isRunning) {
+      sendButtonLabel.textContent = "执行中";
+    }
+  }
+}
+
+async function forceStopTask(options = {}) {
+  const silent = Boolean(options.silent);
+  if (!projectSelect.value && !currentRunSnapshot) {
+    setRunningState(false);
+    return;
+  }
+  forceStopButton.disabled = true;
+  cancelRequested = true;
+  if (!silent) {
+    sendButtonLabel.textContent = "终止中";
+    renderEvent({
+      type: "cancel_requested",
+      agent: "user",
+      message: "正在强制停止当前任务和它启动的本地命令。"
+    });
+  }
+  try {
+    const response = await fetch("/api/force-stop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({})
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Failed to force stop task");
+    if (!silent) {
+      renderEvent({
+        type: "force_stopped",
+        agent: "system",
+        message:
+          data.status === "no_task_running"
+            ? "当前没有正在执行的任务。"
+            : data.status === "stale_lock_cleared"
+              ? "已清理残留锁，可以启动新的任务。"
+              : "已清理当前任务状态，可以启动新的任务。"
+      });
+    }
+    currentRunSnapshot = null;
+    if (projectSelect.value) {
+      await loadConversations(false);
+      await loadConversationHistory();
+    }
+  } catch (error) {
+    if (!silent) {
+      renderEvent({ type: "error", agent: "ui", message: error.message });
+    }
+  } finally {
+    setRunningState(false);
+    if (!silent) {
+      taskInput.focus();
+    }
+  }
+}
+
 async function runTask(task) {
   if (!activeConversationId) await createConversation();
-  sendButton.disabled = true;
-  taskInput.disabled = true;
+  setRunningState(true);
 
-  const response = await fetch("/api/run", {
+  const payload = JSON.stringify({
+    task,
+    project: projectSelect.value,
+    conversation_id: activeConversationId
+  });
+
+  let response = await fetch("/api/run", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      task,
-      project: projectSelect.value,
-      conversation_id: activeConversationId
-    })
+    body: payload
   });
   if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error || "Failed to start task");
+    let error = {};
+    try {
+      error = await response.json();
+    } catch (_) {
+      error = {};
+    }
+    if (response.status === 409) {
+      await forceStopTask({ silent: true });
+      response = await fetch("/api/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: payload
+      });
+      if (!response.ok) {
+        try {
+          error = await response.json();
+        } catch (_) {
+          error = {};
+        }
+      } else {
+        setRunningState(true);
+      }
+    }
+    if (!response.ok) {
+      throw new Error(error.error || "Failed to start task");
+    }
   }
 
   const reader = response.body.getReader();
@@ -258,18 +459,32 @@ async function runTask(task) {
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (isRunning) {
+    await cancelTask();
+    return;
+  }
   const task = taskInput.value.trim();
-  if (!task || sendButton.disabled) return;
+  if (!task) return;
   taskInput.value = "";
   try {
     await runTask(task);
   } catch (error) {
     renderEvent({ type: "error", message: error.message });
   } finally {
-    sendButton.disabled = false;
-    taskInput.disabled = false;
+    setRunningState(false);
     taskInput.focus();
   }
+});
+
+sendButton.addEventListener("click", async (event) => {
+  if (isRunning) {
+    event.preventDefault();
+    await cancelTask();
+  }
+});
+
+forceStopButton.addEventListener("click", async () => {
+  await forceStopTask();
 });
 
 document.querySelector("#newTask").addEventListener("click", async () => {
@@ -301,6 +516,12 @@ taskInput.addEventListener("keydown", (event) => {
   }
 });
 
-loadProjects().catch((error) => {
+async function bootstrap() {
+  await loadProjects();
+  await loadRuntimeState();
+  await forceStopTask({ silent: true });
+}
+
+bootstrap().catch((error) => {
   renderEvent({ type: "error", message: error.message });
 });

@@ -207,11 +207,27 @@ class SessionStore:
         with self.lock:
             conversation = self.get_conversation(conversation_id)
             run = self._find_run(conversation, run_id)
+            if run.get("status") != "running":
+                return run.get("status")
             run["status"] = status
             run["answer"] = answer
             run["finished_at"] = now_iso()
             conversation["updated_at"] = now_iso()
             self._save()
+            return status
+
+    def interrupt_run(self, conversation_id, run_id, answer):
+        with self.lock:
+            conversation = self.get_conversation(conversation_id)
+            run = self._find_run(conversation, run_id)
+            if run.get("status") != "running":
+                return run.get("status")
+            run["status"] = "interrupted"
+            run["answer"] = answer
+            run["finished_at"] = now_iso()
+            conversation["updated_at"] = now_iso()
+            self._save()
+            return "interrupted"
 
     def public_history(self, conversation_id):
         with self.lock:

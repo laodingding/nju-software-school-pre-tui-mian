@@ -1,5 +1,8 @@
 import json
+import os
+import subprocess
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -20,6 +23,8 @@ class App:
         self.project_manager = ProjectManager(workspace)
         self.client = LLMClient()
         self.run_lock = threading.Lock()
+        self.state_lock = threading.Lock()
+        self.current_run = None
         self.recover_incomplete_runs()
 
     def recover_incomplete_runs(self):
@@ -45,7 +50,28 @@ class App:
             tools=tools,
             messages=store.get_messages(conversation_id),
         )
-        return store, conversation_id, agent
+        return store, conversation_id, tools, agent
+
+    def clear_current_run(self, run_id=None):
+        with self.state_lock:
+            if run_id and (
+                not self.current_run
+                or self.current_run.get("run_id") != run_id
+            ):
+                return None
+            current = self.current_run
+            self.current_run = None
+        return current
+
+    def current_run_snapshot(self):
+        with self.state_lock:
+            if not self.current_run:
+                return None
+            snapshot = dict(self.current_run)
+            snapshot.pop("cancel_event", None)
+            snapshot.pop("store", None)
+            snapshot.pop("tools", None)
+            return snapshot
 
 
 def make_handler(app):
@@ -86,6 +112,8 @@ def make_handler(app):
                 return self._send_json(
                     {"projects": app.project_manager.list_projects()}
                 )
+            if path == "/api/current-run":
+                return self._send_json({"current_run": app.current_run_snapshot()})
             if path == "/api/conversations":
                 project_name = parse_qs(parsed.query).get("project", [""])[0]
                 try:
@@ -104,7 +132,7 @@ def make_handler(app):
                 project_name = query.get("project", [""])[0]
                 conversation_id = query.get("conversation_id", [""])[0]
                 try:
-                    store, conversation_id, _ = app.project_context(
+                    store, conversation_id, _, _ = app.project_context(
                         project_name, conversation_id
                     )
                     return self._send_json(store.public_history(conversation_id))
@@ -114,8 +142,17 @@ def make_handler(app):
 
         def do_POST(self):
             path = urlparse(self.path).path
-            if path not in {"/api/run", "/api/conversations"}:
+            if path not in {
+                "/api/run",
+                "/api/conversations",
+                "/api/cancel",
+                "/api/force-stop",
+            }:
                 return self._send_json({"error": "Not found"}, 404)
+            if path == "/api/cancel":
+                return self._cancel_task()
+            if path == "/api/force-stop":
+                return self._force_stop()
             try:
                 length = int(self.headers.get("Content-Length", "0"))
                 payload = json.loads(self.rfile.read(length).decode("utf-8"))
@@ -128,6 +165,67 @@ def make_handler(app):
             if path == "/api/conversations":
                 return self._create_conversation(project_name, payload)
             return self._run_task(project_name, payload)
+
+        def _cancel_task(self):
+            with app.state_lock:
+                current = app.current_run
+                if not current:
+                    return self._send_json({"error": "No task is running"}, 404)
+                current["cancel_event"].set()
+                return self._send_json(
+                    {
+                        "status": "cancel_requested",
+                        "run_id": current["run_id"],
+                        "conversation_id": current["conversation_id"],
+                    }
+                )
+
+        def _force_stop(self):
+            current = app.clear_current_run()
+            if not current:
+                if app.run_lock.locked():
+                    try:
+                        app.run_lock.release()
+                    except RuntimeError:
+                        pass
+                    return self._send_json({"status": "stale_lock_cleared"})
+                return self._send_json({"status": "no_task_running"})
+
+            current["cancel_event"].set()
+            tools = current.get("tools")
+            if tools:
+                tools.terminate_active_processes()
+
+            try:
+                current["store"].interrupt_run(
+                    current["conversation_id"],
+                    current["run_id"],
+                    "Task was force-stopped by user.",
+                )
+                current["store"].add_event(
+                    current["conversation_id"],
+                    current["run_id"],
+                    {
+                        "type": "force_stopped",
+                        "message": "Task was force-stopped by user.",
+                    },
+                )
+            except (KeyError, OSError) as exc:
+                print(f"[history] force-stop save skipped: {type(exc).__name__}: {exc}")
+
+            try:
+                app.run_lock.release()
+            except RuntimeError:
+                pass
+
+            return self._send_json(
+                {
+                    "status": "force_stopped",
+                    "run_id": current["run_id"],
+                    "conversation_id": current["conversation_id"],
+                    "project": current["project"],
+                }
+            )
 
         def _create_conversation(self, project_name, payload):
             title = str(payload.get("title", "")).strip() or "New conversation"
@@ -157,12 +255,23 @@ def make_handler(app):
                 return self._send_json({"error": "Another task is already running"}, 409)
 
             try:
-                store, conversation_id, agent = app.project_context(
+                store, conversation_id, tools, agent = app.project_context(
                     project_name, conversation_id
                 )
                 run_id = store.begin_run(
                     conversation_id, task, project=project_name
                 )
+                cancel_event = threading.Event()
+                with app.state_lock:
+                    app.current_run = {
+                        "project": project_name,
+                        "conversation_id": conversation_id,
+                        "run_id": run_id,
+                        "task": task,
+                        "cancel_event": cancel_event,
+                        "store": store,
+                        "tools": tools,
+                    }
             except (KeyError, OSError, ValueError) as exc:
                 app.run_lock.release()
                 return self._send_json({"error": str(exc)}, 400)
@@ -178,6 +287,14 @@ def make_handler(app):
 
                 def send_event(event):
                     nonlocal stream_open
+                    with app.state_lock:
+                        current = app.current_run
+                        active = bool(
+                            current
+                            and current.get("run_id") == run_id
+                        )
+                    if not active:
+                        return
                     try:
                         store.add_event(conversation_id, run_id, event)
                         store.save_messages(conversation_id, agent.messages)
@@ -203,14 +320,33 @@ def make_handler(app):
                         "conversation_id": conversation_id,
                     }
                 )
-                answer = agent.run(task, on_event=send_event)
+                answer = agent.run(
+                    task,
+                    on_event=send_event,
+                    should_cancel=cancel_event.is_set,
+                )
                 status = agent.last_status
-                try:
-                    store.save_messages(conversation_id, agent.messages)
-                    store.finish_run(conversation_id, run_id, status, answer)
-                except OSError as exc:
-                    print(f"[history] final save skipped: {type(exc).__name__}: {exc}")
-                send_event({"type": "done", "run_id": run_id, "status": status})
+                with app.state_lock:
+                    current = app.current_run
+                    active = bool(
+                        current
+                        and current.get("run_id") == run_id
+                    )
+                if active:
+                    try:
+                        store.save_messages(conversation_id, agent.messages)
+                        final_status = store.finish_run(
+                            conversation_id, run_id, status, answer
+                        )
+                    except OSError as exc:
+                        print(
+                            f"[history] final save skipped: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                        final_status = status
+                    send_event(
+                        {"type": "done", "run_id": run_id, "status": final_status}
+                    )
             except Exception as exc:
                 error = f"{type(exc).__name__}: {exc}"
                 try:
@@ -228,9 +364,56 @@ def make_handler(app):
                 else:
                     self._send_json({"error": error}, 500)
             finally:
-                app.run_lock.release()
+                current = app.clear_current_run(run_id)
+                if current and not current.get("force_stopped"):
+                    try:
+                        app.run_lock.release()
+                    except RuntimeError:
+                        pass
 
     return Handler
+
+
+def runtime_pid_file(host, port):
+    runtime_dir = ROOT / "data" / "runtime"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    safe_host = str(host).replace(":", "_").replace("/", "_")
+    return runtime_dir / f"web_{safe_host}_{port}.pid"
+
+
+def kill_previous_web_process(pid_file):
+    if os.name != "nt" or not pid_file.is_file():
+        return
+    try:
+        pid = int(pid_file.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return
+    if pid == os.getpid():
+        return
+
+    probe = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-Command",
+            (
+                f'$process = Get-CimInstance Win32_Process -Filter "ProcessId = {pid}"; '
+                "if ($process) { $process.CommandLine }"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if "main.py --web" not in (probe.stdout or ""):
+        return
+
+    subprocess.run(
+        ["taskkill", "/PID", str(pid), "/T", "/F"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
 
 
 def main():
@@ -242,14 +425,26 @@ def main():
     parser.add_argument("--workspace", default="workspace")
     args = parser.parse_args()
 
+    pid_file = runtime_pid_file(args.host, args.port)
+    kill_previous_web_process(pid_file)
+    time.sleep(0.2)
     app = App(workspace=args.workspace)
     try:
         server = ThreadingHTTPServer((args.host, args.port), make_handler(app))
     except OSError as exc:
-        raise SystemExit(
-            f"Cannot start web server: port {args.port} is already in use. "
-            "Stop the existing main.py --web process or choose another port."
-        ) from exc
+        kill_previous_web_process(pid_file)
+        time.sleep(0.2)
+        try:
+            server = ThreadingHTTPServer((args.host, args.port), make_handler(app))
+        except OSError as retry_exc:
+            raise SystemExit(
+                f"Cannot start web server: port {args.port} is already in use. "
+                "Stop the existing main.py --web process or choose another port."
+            ) from retry_exc
+    try:
+        pid_file.write_text(str(os.getpid()), encoding="utf-8")
+    except OSError:
+        pass
     print(f"Mini Coding Agent UI: http://{args.host}:{args.port}")
     try:
         server.serve_forever()
@@ -257,6 +452,10 @@ def main():
         print("\nServer stopped.")
     finally:
         server.server_close()
+        try:
+            pid_file.unlink()
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":

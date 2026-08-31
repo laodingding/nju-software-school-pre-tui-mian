@@ -71,19 +71,40 @@ class MultiAgentOrchestrator:
         self.messages = messages or [{"role": "system", "content": SYSTEM_PROMPT}]
         self.last_status = "idle"
 
-    def run(self, task, on_event=None):
+    def run(self, task, on_event=None, should_cancel=None):
         def emit(event_type, **data):
             event = {"type": event_type, **data}
             if on_event:
                 on_event(event)
 
-        use_multi, reason = self._decide(task)
+        def cancelled():
+            return bool(should_cancel and should_cancel())
+
         emit("task", task=task)
+        if cancelled():
+            self.last_status = "cancelled"
+            emit("cancelled", agent="orchestrator", message="Cancelled by user.")
+            emit("assistant", agent="orchestrator", content="Task cancelled by user.")
+            return "Task cancelled by user."
+
+        emit("agent_phase", agent="orchestrator", title="Task routing")
+        emit(
+            "model_waiting",
+            agent="orchestrator",
+            message="Deciding whether multi-agent collaboration is needed...",
+        )
+        use_multi, reason = self._decide(task)
         emit(
             "agent_decision",
             mode="multi-agent" if use_multi else "single-agent",
             reason=reason,
         )
+
+        if cancelled():
+            self.last_status = "cancelled"
+            emit("cancelled", agent="orchestrator", message="Cancelled by user.")
+            emit("assistant", agent="orchestrator", content="Task cancelled by user.")
+            return "Task cancelled by user."
 
         if not use_multi:
             agent = CodingAgent(
@@ -92,13 +113,18 @@ class MultiAgentOrchestrator:
                 messages=self.messages,
                 agent_name="coding-agent",
             )
-            answer = agent.run(task, on_event=on_event, emit_task=False)
+            answer = agent.run(
+                task,
+                on_event=on_event,
+                emit_task=False,
+                should_cancel=should_cancel,
+            )
             self.messages = agent.messages
             self.last_status = agent.last_status
             return answer
 
         self.messages.append({"role": "user", "content": task})
-        answer = self._run_multi_agent(task, emit)
+        answer = self._run_multi_agent(task, emit, should_cancel=should_cancel)
         self.messages.append({"role": "assistant", "content": answer})
         emit("assistant", agent="orchestrator", content=answer)
         return answer
@@ -141,7 +167,15 @@ class MultiAgentOrchestrator:
             return True
         return False
 
-    def _run_multi_agent(self, task, emit):
+    def _run_multi_agent(self, task, emit, should_cancel=None):
+        def cancelled():
+            return bool(should_cancel and should_cancel())
+
+        if cancelled():
+            self.last_status = "cancelled"
+            emit("cancelled", agent="orchestrator", message="Cancelled by user.")
+            return "Task cancelled by user."
+
         emit("agent_phase", agent="requirements-agent", title="Requirements and design")
         requirements = self._run_role_agent(
             agent_name="requirements-agent",
@@ -152,9 +186,13 @@ class MultiAgentOrchestrator:
                 "and verification plan.\n\nTask:\n" + task
             ),
             emit=emit,
+            should_cancel=should_cancel,
         )
         if self.last_status == "error":
             return requirements
+        if self.last_status == "cancelled" or cancelled():
+            self.last_status = "cancelled"
+            return "Task cancelled by user."
 
         emit("agent_phase", agent="implementation-agent", title="Implementation and debug")
         implementation = self._run_role_agent(
@@ -166,9 +204,13 @@ class MultiAgentOrchestrator:
                 f"Original task:\n{task}\n\nDevelopment document:\n{requirements}"
             ),
             emit=emit,
+            should_cancel=should_cancel,
         )
         if self.last_status == "error":
             return implementation
+        if self.last_status == "cancelled" or cancelled():
+            self.last_status = "cancelled"
+            return "Task cancelled by user."
 
         emit("agent_phase", agent="review-agent", title="Review and acceptance")
         review = self._run_role_agent(
@@ -181,9 +223,13 @@ class MultiAgentOrchestrator:
                 f"Implementation summary:\n{implementation}"
             ),
             emit=emit,
+            should_cancel=should_cancel,
         )
         if self.last_status == "error":
             return review
+        if self.last_status == "cancelled" or cancelled():
+            self.last_status = "cancelled"
+            return "Task cancelled by user."
 
         if review.strip().upper().startswith("CHANGES_REQUIRED:"):
             emit(
@@ -201,9 +247,13 @@ class MultiAgentOrchestrator:
                     f"Review feedback:\n{review}"
                 ),
                 emit=emit,
+                should_cancel=should_cancel,
             )
             if self.last_status == "error":
                 return implementation
+            if self.last_status == "cancelled" or cancelled():
+                self.last_status = "cancelled"
+                return "Task cancelled by user."
 
             emit("agent_phase", agent="review-agent", title="Final review")
             review = self._run_role_agent(
@@ -215,9 +265,13 @@ class MultiAgentOrchestrator:
                     f"Revision summary:\n{implementation}"
                 ),
                 emit=emit,
+                should_cancel=should_cancel,
             )
             if self.last_status == "error":
                 return review
+            if self.last_status == "cancelled" or cancelled():
+                self.last_status = "cancelled"
+                return "Task cancelled by user."
 
         if review.strip().upper().startswith("CHANGES_REQUIRED:"):
             self.last_status = "error"
@@ -238,13 +292,18 @@ class MultiAgentOrchestrator:
             f"{review}"
         )
 
-    def _run_role_agent(self, agent_name, system_prompt, task, emit):
+    def _run_role_agent(self, agent_name, system_prompt, task, emit, should_cancel=None):
         agent = CodingAgent(
             self.client,
             self.tools,
             system_prompt=system_prompt,
             agent_name=agent_name,
         )
-        answer = agent.run(task, on_event=emit, emit_task=False)
+        answer = agent.run(
+            task,
+            on_event=emit,
+            emit_task=False,
+            should_cancel=should_cancel,
+        )
         self.last_status = agent.last_status
         return answer

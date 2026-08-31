@@ -31,6 +31,8 @@ ignored by Git.
 ## Features
 
 - Browser chat UI with live execution events through SSE.
+- Manual force-stop button to clear the active run, kill current command processes,
+  and release the workspace lock for the next task.
 - Local tools: `list_files`, `read_file`, `write_file`, and `run_command`.
 - Project isolation: every first-level directory under `workspace/` is a project.
 - Conversation isolation: each project can contain multiple independent chats.

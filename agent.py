@@ -1,5 +1,7 @@
 import json
 
+from tools import ToolCancelled
+
 
 SYSTEM_PROMPT = """You are a careful coding agent.
 You work only inside the provided workspace.
@@ -28,11 +30,14 @@ class CodingAgent:
         emit("assistant", agent=self.agent_name, content=answer)
         return answer
 
-    def run(self, task, on_event=None, emit_task=True):
+    def run(self, task, on_event=None, emit_task=True, should_cancel=None):
         def emit(event_type, **data):
             event = {"type": event_type, **data}
             if on_event:
                 on_event(event)
+
+        def cancelled():
+            return bool(should_cancel and should_cancel())
 
         self.last_status = "running"
         self.messages.append({"role": "user", "content": task})
@@ -42,6 +47,10 @@ class CodingAgent:
         step = 0
 
         while True:
+            if cancelled():
+                emit("cancelled", agent=self.agent_name, message="Cancelled by user.")
+                return self._finish("Task cancelled by user.", "cancelled", emit)
+
             step += 1
             emit("step", agent=self.agent_name, step=step)
             emit(
@@ -60,6 +69,10 @@ class CodingAgent:
                     "error",
                     emit,
                 )
+
+            if cancelled():
+                emit("cancelled", agent=self.agent_name, message="Cancelled by user.")
+                return self._finish("Task cancelled by user.", "cancelled", emit)
 
             self.messages.append(message)
             tool_calls = message.get("tool_calls") or []
@@ -87,6 +100,10 @@ class CodingAgent:
                 return self._finish(answer, "completed", emit)
 
             for tool_call in tool_calls:
+                if cancelled():
+                    emit("cancelled", agent=self.agent_name, message="Cancelled by user.")
+                    return self._finish("Task cancelled by user.", "cancelled", emit)
+
                 function = tool_call.get("function") or {}
                 name = function.get("name", "")
                 arguments_text = function.get("arguments") or "{}"
@@ -104,7 +121,14 @@ class CodingAgent:
                     arguments = json.loads(arguments_text)
                     if not isinstance(arguments, dict):
                         raise ValueError("Tool arguments must be a JSON object.")
-                    result = self.tools.call(name, arguments)
+                    result = self.tools.call(
+                        name,
+                        arguments,
+                        should_cancel=should_cancel,
+                    )
+                except ToolCancelled:
+                    emit("cancelled", agent=self.agent_name, message="Cancelled by user.")
+                    return self._finish("Task cancelled by user.", "cancelled", emit)
                 except Exception as exc:
                     reason = (
                         f"Tool {name or '(unknown)'} failed: "
