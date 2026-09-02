@@ -52,7 +52,7 @@ class App:
         )
         return store, conversation_id, tools, agent
 
-    def clear_current_run(self, run_id=None):
+    def clear_current_run(self, run_id=None, release_lock=False):
         with self.state_lock:
             if run_id and (
                 not self.current_run
@@ -61,6 +61,11 @@ class App:
                 return None
             current = self.current_run
             self.current_run = None
+            if release_lock:
+                try:
+                    self.run_lock.release()
+                except RuntimeError:
+                    pass
         return current
 
     def current_run_snapshot(self):
@@ -186,22 +191,27 @@ def make_handler(app):
                 )
 
         def _force_stop(self):
+            # Keep the run lock until child processes and history are fully
+            # cleaned up, so a new task cannot start during force-stop.
             current = app.clear_current_run()
             if not current:
-                if app.run_lock.locked():
-                    try:
-                        app.run_lock.release()
-                    except RuntimeError:
-                        pass
-                    return self._send_json({"status": "stale_lock_cleared"})
+                # New runs update current_run while holding state_lock, so a
+                # lock without a run is only a stale lock from an older or
+                # interrupted startup path.
+                with app.state_lock:
+                    if app.run_lock.locked():
+                        try:
+                            app.run_lock.release()
+                        except RuntimeError:
+                            pass
+                        return self._send_json({"status": "stale_lock_cleared"})
                 return self._send_json({"status": "no_task_running"})
 
             current["cancel_event"].set()
             tools = current.get("tools")
-            if tools:
-                tools.terminate_active_processes()
-
             try:
+                if tools:
+                    tools.terminate_active_processes()
                 current["store"].interrupt_run(
                     current["conversation_id"],
                     current["run_id"],
@@ -217,11 +227,12 @@ def make_handler(app):
                 )
             except (KeyError, OSError) as exc:
                 print(f"[history] force-stop save skipped: {type(exc).__name__}: {exc}")
-
-            try:
-                app.run_lock.release()
-            except RuntimeError:
-                pass
+            finally:
+                with app.state_lock:
+                    try:
+                        app.run_lock.release()
+                    except RuntimeError:
+                        pass
 
             return self._send_json(
                 {
@@ -256,18 +267,24 @@ def make_handler(app):
             if not conversation_id:
                 return self._send_json({"error": "Conversation is required"}, 400)
 
-            if not app.run_lock.acquire(blocking=False):
-                return self._send_json({"error": "Another task is already running"}, 409)
-
+            cancel_event = threading.Event()
             try:
-                store, conversation_id, tools, agent = app.project_context(
-                    project_name, conversation_id
-                )
-                run_id = store.begin_run(
-                    conversation_id, task, project=project_name
-                )
-                cancel_event = threading.Event()
                 with app.state_lock:
+                    if app.current_run or not app.run_lock.acquire(blocking=False):
+                        return self._send_json(
+                            {"error": "Another task is already running"},
+                            409,
+                        )
+                    try:
+                        store, conversation_id, tools, agent = app.project_context(
+                            project_name, conversation_id
+                        )
+                        run_id = store.begin_run(
+                            conversation_id, task, project=project_name
+                        )
+                    except Exception:
+                        app.run_lock.release()
+                        raise
                     app.current_run = {
                         "project": project_name,
                         "conversation_id": conversation_id,
@@ -278,7 +295,6 @@ def make_handler(app):
                         "tools": tools,
                     }
             except (KeyError, OSError, ValueError) as exc:
-                app.run_lock.release()
                 return self._send_json({"error": str(exc)}, 400)
 
             try:
@@ -379,12 +395,7 @@ def make_handler(app):
                 else:
                     self._send_json({"error": error}, 500)
             finally:
-                current = app.clear_current_run(run_id)
-                if current and not current.get("force_stopped"):
-                    try:
-                        app.run_lock.release()
-                    except RuntimeError:
-                        pass
+                app.clear_current_run(run_id, release_lock=True)
 
     return Handler
 
