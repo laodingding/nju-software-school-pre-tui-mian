@@ -16,14 +16,21 @@
           <span>Local workspace</span>
         </div>
       </div>
-      <button class="new-task" id="newTask">+ 新建对话</button>
+
+      <button class="new-task" id="newTask" type="button">
+        <span class="button-icon">+</span>
+        <span>新建对话</span>
+      </button>
+
       <label class="project-label" for="projectSelect">当前项目</label>
       <select id="projectSelect" class="project-select"></select>
+
       <div class="history-heading">
         <span>对话历史</span>
         <span class="history-count" id="historyCount">0</span>
       </div>
       <div class="history-list" id="historyList"></div>
+
       <div class="sidebar-footer">
         <span class="status-dot"></span>
         <span>本地 Agent 在线</span>
@@ -35,26 +42,60 @@
         <div>
           <span class="eyebrow">CODING SESSION</span>
           <h1>编程工作台</h1>
+          <p class="topbar-subtitle">从需求分析到代码交付，完整记录每一步。</p>
         </div>
         <div class="connection"><span class="status-dot"></span> DashScope / Qwen</div>
       </header>
+
+      <section class="run-overview" id="runOverview" aria-live="polite">
+        <div class="run-overview-main">
+          <div class="run-status-icon" id="runStatusIcon">○</div>
+          <div>
+            <div class="run-kicker" id="runKicker">READY</div>
+            <h2 id="runTitle">等待新的编程任务</h2>
+            <p id="runSummary">选择一个项目，描述你希望 Agent 完成的内容。</p>
+          </div>
+        </div>
+        <div class="run-metrics">
+          <div class="metric"><span>阶段</span><strong id="runPhase">-</strong></div>
+          <div class="metric"><span>步骤</span><strong id="runStep">-</strong></div>
+          <div class="metric"><span>状态</span><strong id="runStatus">待执行</strong></div>
+        </div>
+        <div class="progress-track"><span id="runProgress"></span></div>
+      </section>
 
       <section class="conversation" id="conversation">
         <div class="empty-state" id="emptyState">
           <div class="empty-icon">&lt;_</div>
           <h2>把编程任务交给 Agent</h2>
-          <p>它会在当前项目中读取文件、修改代码并运行命令。</p>
+          <p>它会在当前项目中读取文件、修改代码、运行测试并反馈最终结果。</p>
         </div>
+      </section>
+
+      <section class="final-result hidden" id="finalResult" aria-live="polite">
+        <div class="result-heading">
+          <div>
+            <span class="eyebrow">DELIVERY RESULT</span>
+            <h2>最终结果</h2>
+          </div>
+          <span class="result-status" id="resultStatus">-</span>
+        </div>
+        <div class="result-content" id="resultContent"></div>
       </section>
 
       <form class="composer" id="taskForm">
         <textarea id="taskInput" rows="3" placeholder="描述你想完成的编程任务..." required></textarea>
         <div class="composer-bar">
           <span class="scope-label" id="scopeLabel">workspace/</span>
-          <button class="stop-button" id="forceStopButton" type="button" disabled>强制停止</button>
-          <button class="send-button" id="sendButton" type="submit">
-            <span>执行任务</span><span class="send-arrow">→</span>
-          </button>
+          <div class="composer-actions">
+            <button class="stop-button" id="forceStopButton" type="button" disabled>
+              <span class="button-icon">×</span>
+              <span>强制停止</span>
+            </button>
+            <button class="send-button" id="sendButton" type="submit">
+              <span>执行任务</span><span class="send-arrow">→</span>
+            </button>
+          </div>
         </div>
       </form>
     </main>

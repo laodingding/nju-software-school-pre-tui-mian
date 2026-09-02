@@ -95,6 +95,7 @@ def make_handler(app):
             body = path.read_bytes()
             self.send_response(200)
             self.send_header("Content-Type", f"{content_type}; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -104,6 +105,10 @@ def make_handler(app):
             path = parsed.path
             if path == "/":
                 return self._send_file(WEB_ROOT / "index.html", "text/html")
+            if path == "/favicon.ico":
+                self.send_response(204)
+                self.end_headers()
+                return
             if path == "/app.css":
                 return self._send_file(WEB_ROOT / "app.css", "text/css")
             if path == "/app.js":
@@ -345,7 +350,12 @@ def make_handler(app):
                         )
                         final_status = status
                     send_event(
-                        {"type": "done", "run_id": run_id, "status": final_status}
+                        {
+                            "type": "done",
+                            "run_id": run_id,
+                            "status": final_status,
+                            "answer": answer,
+                        }
                     )
             except Exception as exc:
                 error = f"{type(exc).__name__}: {exc}"
@@ -359,7 +369,12 @@ def make_handler(app):
                 if "send_event" in locals():
                     send_event({"type": "error", "message": error})
                     send_event(
-                        {"type": "done", "run_id": run_id, "status": "error"}
+                        {
+                            "type": "done",
+                            "run_id": run_id,
+                            "status": "error",
+                            "answer": error,
+                        }
                     )
                 else:
                     self._send_json({"error": error}, 500)

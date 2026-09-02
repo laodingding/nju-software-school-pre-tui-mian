@@ -9,7 +9,7 @@ def load_config(path=DEFAULT_CONFIG_PATH):
     config = {
         "api_key": None,
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "model": "qwen3.8-max",
+        "model": "qwen3.8-flash",
         "request_timeout": 180,
         "enable_thinking": False,
     }

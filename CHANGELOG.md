@@ -1,34 +1,60 @@
-# Changelog
+# 更新日志
+
+## 2026-09-02
+
+### 完善
+
+- 重写前端执行脚本，统一处理 SSE 实时事件、历史记录回放和任务状态。
+- 在前端增加运行概览面板，展示当前 Agent 阶段、执行步骤和任务状态。
+- 在前端增加最终结果区域，展示任务成功结果、失败原因、中断信息和工具限制。
+- 支持页面刷新后恢复当前项目、当前对话和正在执行的任务。
+- 移除页面初始化时自动强制停止任务的逻辑，避免刷新导致任务被误清理。
+- 增加运行状态轮询，在 SSE 连接中断时通过历史接口继续同步执行进度。
+- 统一展示需求分析、开发实现、测试、代码审查、工具调用和工具返回结果。
+- 修复前端旧脚本中的乱码和字符串错误。
+- 优化桌面端和移动端布局，改善运行状态、时间线和最终结果的可读性。
+- 完善中文 README，补充安装、配置、使用、多 Agent、Playwright、接口和安全说明。
+
+### 验证
+
+- 通过 `node --check web/app.js`。
+- 通过 Python 模块编译检查。
+- 通过 `git diff --check`。
+- 使用 Playwright 检查桌面端和移动端页面。
+- 确认浏览器控制台无错误。
+
+## 2026-09-01
+
+### 新增
+
+- 增加 `run_playwright_cli` 工具，通过 npm 调用 `@playwright/cli` 进行浏览器自动化。
+- 增加 Web 界面自测指引，支持页面导航、交互、控制台、网络请求和截图检查。
 
 ## 2026-08-31
 
-### Added
+### 新增
 
-- Added multi-agent orchestration that lets the agent decide between a simple
-  single-agent run and a three-agent workflow.
-- Added requirements, implementation/debug/testing, and review agents for
-  complex tasks.
-- Added live frontend rendering for each sub-agent phase, model wait, tool call,
-  tool result, cancellation, force-stop, and completion event.
-- Added manual force-stop support to clear the current run, terminate active
-  command subprocesses, and release the run lock.
-- Added `/api/current-run`, `/api/cancel`, and `/api/force-stop` runtime APIs.
-- Added startup recovery for unfinished historical runs.
-- Added a PID-file based web startup guard so a new `main.py --web` instance can
-  stop the previous local web process before binding the port.
+- 增加多 Agent 协同流程，由总控 Agent 自动判断使用单 Agent 或三 Agent 模式。
+- 增加需求分析 Agent、开发与测试 Agent、代码审查 Agent。
+- 增加实时执行事件展示，覆盖 Agent 阶段、模型等待、工具调用、工具结果、取消、强制停止和完成状态。
+- 增加手动强制停止功能，清理当前任务、终止活动命令进程并释放任务锁。
+- 增加 `/api/current-run`、`/api/cancel` 和 `/api/force-stop` 接口。
+- 增加服务重启后的未完成任务恢复逻辑。
+- 增加基于 PID 文件的 Web 服务启动保护，避免旧服务占用端口。
 
-### Changed
+### 修改
 
-- Removed the fixed maximum step limit from the agent loop.
-- Updated the agent to stop with a clear error when a task cannot continue with
-  the available tools.
-- Improved project and conversation isolation so histories stay separated by
-  project and chat.
-- Bound the frontend execute button to runtime state: it shows `执行中` while a
-  task is running and returns to normal after completion, cancellation, or error.
-- Updated the frontend to automatically clear stale runtime state and retry once
-  when a new task hits `Another task is already running`.
-- Made `run_command` cancellable and ensured active subprocesses can be killed
-  during manual force-stop.
-- Updated README feature documentation for force-stop, crash recovery, and
-  multi-agent behavior.
+- 移除 Agent 循环的固定最大步骤限制。
+- 当模型或工具无法继续解决任务时，结束任务并向用户返回具体异常原因。
+- 改进项目隔离和对话隔离，确保不同项目和不同对话的上下文互不影响。
+- 执行任务按钮绑定实际运行状态，执行时显示红色“执行中”。
+- 改进 `run_command` 的取消和进程终止逻辑。
+
+## 2026-08-29
+
+### 初始版本
+
+- 完成基础单 Agent 编程任务流程。
+- 支持列出文件、读取文件、写入文件和执行命令。
+- 增加 DashScope OpenAI 兼容 API 配置。
+- 增加基础 Web 对话界面和本地历史记录。
