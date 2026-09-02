@@ -64,6 +64,61 @@
         <div class="progress-track"><span id="runProgress"></span></div>
       </section>
 
+      <section class="collaboration-board hidden" id="collaborationBoard" aria-live="polite">
+        <div class="collaboration-heading">
+          <div>
+            <span class="eyebrow">TEAM WORKFLOW</span>
+            <h2>多 Agent 协作分工</h2>
+          </div>
+          <span class="collaboration-summary" id="collaborationSummary">等待协作启动</span>
+        </div>
+        <div class="agent-lane">
+          <article class="agent-card agent-card-orchestrator" data-agent="orchestrator">
+            <div class="agent-card-top">
+              <span class="agent-avatar">总</span>
+              <span class="agent-status">待开始</span>
+            </div>
+            <strong>总控 Agent</strong>
+            <span class="agent-role">任务拆解与流程调度</span>
+            <p class="agent-detail">等待分配协作任务</p>
+            <span class="agent-card-action">查看交付内容</span>
+          </article>
+          <span class="lane-arrow" aria-hidden="true">→</span>
+          <article class="agent-card agent-card-requirements" data-agent="requirements-agent">
+            <div class="agent-card-top">
+              <span class="agent-avatar">需</span>
+              <span class="agent-status">待开始</span>
+            </div>
+            <strong>需求分析 Agent</strong>
+            <span class="agent-role">需求理解与开发文档</span>
+            <p class="agent-detail">等待接收任务</p>
+            <span class="agent-card-action">查看交付内容</span>
+          </article>
+          <span class="lane-arrow" aria-hidden="true">→</span>
+          <article class="agent-card agent-card-implementation" data-agent="implementation-agent">
+            <div class="agent-card-top">
+              <span class="agent-avatar">开</span>
+              <span class="agent-status">待开始</span>
+            </div>
+            <strong>开发与测试 Agent</strong>
+            <span class="agent-role">编码、调试与验证</span>
+            <p class="agent-detail">等待接收开发文档</p>
+            <span class="agent-card-action">查看交付内容</span>
+          </article>
+          <span class="lane-arrow" aria-hidden="true">→</span>
+          <article class="agent-card agent-card-review" data-agent="review-agent">
+            <div class="agent-card-top">
+              <span class="agent-avatar">审</span>
+              <span class="agent-status">待开始</span>
+            </div>
+            <strong>代码审查 Agent</strong>
+            <span class="agent-role">质量与需求验收</span>
+            <p class="agent-detail">等待接收实现结果</p>
+            <span class="agent-card-action">查看交付内容</span>
+          </article>
+        </div>
+      </section>
+
       <section class="conversation" id="conversation">
         <div class="empty-state" id="emptyState">
           <div class="empty-icon">&lt;_</div>
@@ -99,6 +154,24 @@
         </div>
       </form>
     </main>
+  </div>
+  <div class="delivery-modal hidden" id="deliveryModal">
+    <div class="delivery-backdrop" data-close-delivery></div>
+    <section class="delivery-dialog" role="dialog" aria-modal="true" aria-labelledby="deliveryTitle">
+      <header class="delivery-dialog-head">
+        <div>
+          <span class="eyebrow">AGENT DELIVERY</span>
+          <h2 id="deliveryTitle">Agent 交付详情</h2>
+          <p id="deliveryRole">查看该 Agent 的阶段产出和交接记录。</p>
+        </div>
+        <button class="icon-button" id="closeDelivery" type="button" aria-label="关闭交付详情" title="关闭交付详情">×</button>
+      </header>
+      <div class="delivery-dialog-meta">
+        <span class="delivery-status" id="deliveryStatus">-</span>
+        <span id="deliveryRoute">-</span>
+      </div>
+      <div class="delivery-list" id="deliveryList"></div>
+    </section>
   </div>
   <script src="/app.js"></script>
 </body>

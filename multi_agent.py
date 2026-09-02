@@ -81,7 +81,12 @@ class MultiAgentOrchestrator:
 
     def run(self, task, on_event=None, should_cancel=None):
         def emit(event_type, **data):
-            event = {"type": event_type, **data}
+            # Role agents already emit event dictionaries. Flatten those
+            # callbacks instead of storing them as {"type": {...}}.
+            if isinstance(event_type, dict):
+                event = {**event_type, **data}
+            else:
+                event = {"type": event_type, **data}
             if on_event:
                 on_event(event)
 
@@ -202,6 +207,14 @@ class MultiAgentOrchestrator:
             self.last_status = "cancelled"
             return "Task cancelled by user."
 
+        emit(
+            "agent_handoff",
+            from_agent="requirements-agent",
+            to_agent="implementation-agent",
+            title="需求分析完成，交接开发文档",
+            content=requirements,
+            artifact=".agent/requirements.md",
+        )
         emit("agent_phase", agent="implementation-agent", title="Implementation and debug")
         implementation = self._run_role_agent(
             agent_name="implementation-agent",
@@ -220,6 +233,14 @@ class MultiAgentOrchestrator:
             self.last_status = "cancelled"
             return "Task cancelled by user."
 
+        emit(
+            "agent_handoff",
+            from_agent="implementation-agent",
+            to_agent="review-agent",
+            title="开发与测试完成，交接审查材料",
+            content=implementation,
+            artifact="已修改的项目文件和测试结果",
+        )
         emit("agent_phase", agent="review-agent", title="Review and acceptance")
         review = self._run_role_agent(
             agent_name="review-agent",
@@ -240,6 +261,14 @@ class MultiAgentOrchestrator:
             return "Task cancelled by user."
 
         if review.strip().upper().startswith("CHANGES_REQUIRED:"):
+            emit(
+                "agent_handoff",
+                from_agent="review-agent",
+                to_agent="implementation-agent",
+                title="审查发现问题，交接修复清单",
+                content=review,
+                artifact="审查问题和待修复项",
+            )
             emit(
                 "agent_phase",
                 agent="implementation-agent",
@@ -263,6 +292,14 @@ class MultiAgentOrchestrator:
                 self.last_status = "cancelled"
                 return "Task cancelled by user."
 
+            emit(
+                "agent_handoff",
+                from_agent="implementation-agent",
+                to_agent="review-agent",
+                title="根据审查意见修复完成，重新交接验收",
+                content=implementation,
+                artifact="修复后的项目文件和复测结果",
+            )
             emit("agent_phase", agent="review-agent", title="Final review")
             review = self._run_role_agent(
                 agent_name="review-agent",
@@ -281,6 +318,14 @@ class MultiAgentOrchestrator:
                 self.last_status = "cancelled"
                 return "Task cancelled by user."
 
+        emit(
+            "agent_handoff",
+            from_agent="review-agent",
+            to_agent="orchestrator",
+            title="代码审查完成，交接最终验收结论",
+            content=review,
+            artifact="审查结论和需求验收结果",
+        )
         if review.strip().upper().startswith("CHANGES_REQUIRED:"):
             self.last_status = "error"
             emit("error", agent="orchestrator", message=review)

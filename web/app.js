@@ -22,6 +22,15 @@ const runProgress = document.querySelector("#runProgress");
 const finalResult = document.querySelector("#finalResult");
 const resultStatus = document.querySelector("#resultStatus");
 const resultContent = document.querySelector("#resultContent");
+const collaborationBoard = document.querySelector("#collaborationBoard");
+const collaborationSummary = document.querySelector("#collaborationSummary");
+const deliveryModal = document.querySelector("#deliveryModal");
+const deliveryTitle = document.querySelector("#deliveryTitle");
+const deliveryRole = document.querySelector("#deliveryRole");
+const deliveryStatus = document.querySelector("#deliveryStatus");
+const deliveryRoute = document.querySelector("#deliveryRoute");
+const deliveryList = document.querySelector("#deliveryList");
+const closeDelivery = document.querySelector("#closeDelivery");
 
 let conversations = [];
 let projects = [];
@@ -33,6 +42,8 @@ let currentRunId = null;
 let streamConnected = false;
 let pollTimer = null;
 let lastRenderedTask = "";
+let activeCollaborationAgent = null;
+let agentDeliveries = {};
 
 const STATUS_LABELS = {
   completed: "已完成",
@@ -53,6 +64,37 @@ const AGENT_LABELS = {
   user: "用户",
   system: "系统",
   ui: "界面",
+};
+
+const AGENT_DEFAULT_DETAILS = {
+  orchestrator: "等待分配协作任务",
+  "requirements-agent": "等待接收任务",
+  "implementation-agent": "等待接收开发文档",
+  "review-agent": "等待接收实现结果",
+};
+
+const AGENT_DELIVERY_DEFAULTS = {
+  "requirements-agent": {
+    title: "需求分析阶段交付",
+    artifact: ".agent/requirements.md",
+  },
+  "implementation-agent": {
+    title: "开发与测试阶段交付",
+    artifact: "已修改的项目文件和测试结果",
+  },
+  "review-agent": {
+    title: "代码审查阶段交付",
+    artifact: "审查结论和需求验收结果",
+  },
+};
+
+const PHASE_LABELS = {
+  "Task routing": "任务路由与调度",
+  "Requirements and design": "需求分析与开发设计",
+  "Implementation and debug": "代码实现与调试",
+  "Review and acceptance": "代码审查与需求验收",
+  "Revision from review feedback": "根据审查意见修复",
+  "Final review": "最终代码审查",
 };
 
 function projectStorageKey() {
@@ -76,6 +118,327 @@ function statusLabel(status) {
 
 function agentLabel(agent) {
   return AGENT_LABELS[agent] || agent || "Agent";
+}
+
+function phaseLabel(title) {
+  return PHASE_LABELS[title] || title || "工作阶段";
+}
+
+function agentClassName(agent) {
+  if (!agent) return "";
+  return `agent-${String(agent).replace(/[^a-z0-9]+/gi, "-").toLowerCase()}`;
+}
+
+function normalizeEvent(event) {
+  if (
+    event
+    && event.type
+    && typeof event.type === "object"
+    && typeof event.type.type === "string"
+  ) {
+    return { ...event, ...event.type, type: event.type.type };
+  }
+  return event;
+}
+
+function agentCard(agent) {
+  return collaborationBoard.querySelector(`[data-agent="${agent}"]`);
+}
+
+function updateAgentCardAction(agent) {
+  const card = agentCard(agent);
+  if (!card) return;
+  const action = card.querySelector(".agent-card-action");
+  if (!action) return;
+  const count = (agentDeliveries[agent] || []).length;
+  action.textContent = count
+    ? `查看交付内容（${count}）`
+    : "查看交付内容";
+  card.classList.toggle("has-delivery", count > 0);
+  card.setAttribute("aria-label", `${agentLabel(agent)}，点击查看交付内容`);
+}
+
+function recordAgentDelivery(agent, packet) {
+  if (!AGENT_DEFAULT_DETAILS[agent]) return;
+  if (!agentDeliveries[agent]) agentDeliveries[agent] = [];
+  const delivery = {
+    title: packet.title || "阶段结果交接",
+    content: packet.content || "",
+    artifact: packet.artifact || "",
+    toAgent: packet.toAgent || "",
+    provisional: Boolean(packet.provisional),
+  };
+
+  // A role agent emits its final assistant message just before the
+  // orchestrator emits the formal handoff. Merge those two records so a
+  // normal run shows one complete delivery, while interrupted runs still
+  // retain the assistant result as a reviewable fallback.
+  const provisionalIndex = agentDeliveries[agent].findLastIndex(
+    (item) => item.provisional,
+  );
+  if (!delivery.provisional && provisionalIndex >= 0) {
+    agentDeliveries[agent][provisionalIndex] = {
+      ...agentDeliveries[agent][provisionalIndex],
+      ...delivery,
+      provisional: false,
+    };
+  } else {
+    agentDeliveries[agent].push(delivery);
+  }
+  updateAgentCardAction(agent);
+}
+
+function closeDeliveryModal() {
+  deliveryModal.classList.add("hidden");
+  document.body.classList.remove("modal-open");
+}
+
+function openDeliveryModal(agent) {
+  const card = agentCard(agent);
+  if (!card) return;
+  deliveryTitle.textContent = agentLabel(agent);
+  deliveryRole.textContent = card.querySelector(".agent-role")?.textContent
+    || "查看该 Agent 的阶段产出和交接记录。";
+  deliveryStatus.textContent = card.querySelector(".agent-status")?.textContent || "待开始";
+  deliveryRoute.textContent = "";
+  deliveryList.innerHTML = "";
+
+  const deliveries = agentDeliveries[agent] || [];
+  if (!deliveries.length) {
+    const empty = document.createElement("div");
+    empty.className = "delivery-empty";
+    empty.textContent = "该 Agent 目前还没有可查看的交付内容。";
+    deliveryList.appendChild(empty);
+  } else {
+    deliveries.forEach((delivery, index) => {
+      const entry = document.createElement("article");
+      entry.className = `delivery-entry ${agentClassName(agent)}`.trim();
+
+      const entryHead = document.createElement("div");
+      entryHead.className = "delivery-entry-head";
+      const entryTitle = document.createElement("strong");
+      entryTitle.textContent = delivery.title;
+      const entryIndex = document.createElement("span");
+      entryIndex.className = "delivery-entry-index";
+      entryIndex.textContent = `DELIVERY ${index + 1}`;
+      entryHead.append(entryTitle, entryIndex);
+      entry.appendChild(entryHead);
+
+      if (delivery.toAgent) {
+        const route = document.createElement("div");
+        route.className = "delivery-entry-route";
+        route.textContent = `交接给：${agentLabel(delivery.toAgent)}`;
+        entry.appendChild(route);
+      }
+      if (delivery.artifact) {
+        const artifact = document.createElement("div");
+        artifact.className = "delivery-entry-artifact";
+        artifact.textContent = `交付产物：${delivery.artifact}`;
+        entry.appendChild(artifact);
+      }
+
+      const content = document.createElement("div");
+      content.className = "delivery-entry-content";
+      content.textContent = delivery.content || "本次交付没有附加文字内容。";
+      entry.appendChild(content);
+      deliveryList.appendChild(entry);
+    });
+  }
+
+  const latest = deliveries[deliveries.length - 1];
+  deliveryRoute.textContent = latest?.toAgent
+    ? `最近一次交接：${agentLabel(agent)} → ${agentLabel(latest.toAgent)}`
+    : "查看该 Agent 的阶段交付内容";
+  deliveryModal.classList.remove("hidden");
+  document.body.classList.add("modal-open");
+  closeDelivery.focus();
+}
+
+function bindAgentCardInteractions() {
+  collaborationBoard.querySelectorAll(".agent-card").forEach((card) => {
+    const agent = card.dataset.agent;
+    card.setAttribute("role", "button");
+    card.setAttribute("tabindex", "0");
+    card.setAttribute("aria-label", `${agentLabel(agent)}，点击查看交付内容`);
+    card.addEventListener("click", () => openDeliveryModal(agent));
+    card.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        openDeliveryModal(agent);
+      }
+    });
+  });
+}
+
+function setAgentCardState(agent, state, detail) {
+  const card = agentCard(agent);
+  if (!card) return;
+  card.classList.remove("active", "completed", "error");
+  if (state) card.classList.add(state);
+  const status = card.querySelector(".agent-status");
+  const detailElement = card.querySelector(".agent-detail");
+  if (status) {
+    status.textContent = state === "active"
+      ? "进行中"
+      : state === "completed"
+        ? "已完成"
+        : state === "error"
+          ? "需处理"
+          : "待开始";
+  }
+  if (detailElement && detail) detailElement.textContent = detail;
+}
+
+function resetCollaborationBoard() {
+  activeCollaborationAgent = null;
+  agentDeliveries = {};
+  collaborationBoard.classList.add("hidden");
+  collaborationSummary.textContent = "等待协作启动";
+  Object.entries(AGENT_DEFAULT_DETAILS).forEach(([agent, detail]) => {
+    setAgentCardState(agent, "", detail);
+    updateAgentCardAction(agent);
+  });
+}
+
+function updateCollaboration(event) {
+  const { type, agent } = event;
+  if (type === "agent_decision") {
+    if (event.mode !== "multi-agent") {
+      resetCollaborationBoard();
+      return;
+    }
+    collaborationBoard.classList.remove("hidden");
+    collaborationSummary.textContent = "3 个专业 Agent 接力协作";
+    setAgentCardState(
+      "orchestrator",
+      "active",
+      "已完成难度判断，正在调度专业 Agent",
+    );
+    activeCollaborationAgent = "orchestrator";
+    return;
+  }
+
+  if (type === "agent_handoff") {
+    collaborationBoard.classList.remove("hidden");
+    recordAgentDelivery(event.from_agent, {
+      title: event.title,
+      content: event.content,
+      artifact: event.artifact,
+      toAgent: event.to_agent,
+    });
+    const fromAgent = AGENT_DEFAULT_DETAILS[event.from_agent]
+      ? event.from_agent
+      : null;
+    const toAgent = AGENT_DEFAULT_DETAILS[event.to_agent]
+      ? event.to_agent
+      : null;
+    if (fromAgent) {
+      setAgentCardState(
+        fromAgent,
+        "completed",
+        `已将交接材料发送给${agentLabel(event.to_agent)}`,
+      );
+    }
+    if (toAgent) {
+      activeCollaborationAgent = toAgent;
+      setAgentCardState(
+        toAgent,
+        "active",
+        `已收到${agentLabel(event.from_agent)}的交接材料`,
+      );
+    }
+    collaborationSummary.textContent = `${agentLabel(event.from_agent)} → ${agentLabel(event.to_agent)} 已完成交接`;
+    return;
+  }
+
+  const trackedAgent = AGENT_DEFAULT_DETAILS[agent] ? agent : null;
+  if (type === "agent_phase" && trackedAgent) {
+    collaborationBoard.classList.remove("hidden");
+    if (
+      activeCollaborationAgent
+      && activeCollaborationAgent !== trackedAgent
+    ) {
+      setAgentCardState(
+        activeCollaborationAgent,
+        "completed",
+        "已完成当前阶段，结果已交接",
+      );
+    }
+    activeCollaborationAgent = trackedAgent;
+    collaborationSummary.textContent = `${agentLabel(trackedAgent)} 正在接力执行`;
+    setAgentCardState(trackedAgent, "active", event.title || "正在执行当前阶段");
+    return;
+  }
+
+  if (trackedAgent && ["step", "model_waiting", "tool_start", "tool_result"].includes(type)) {
+    collaborationBoard.classList.remove("hidden");
+    activeCollaborationAgent = trackedAgent;
+    const detail = type === "step"
+      ? `正在分析第 ${event.step || "-"} 步`
+      : type === "model_waiting"
+        ? "正在等待模型给出下一步方案"
+        : type === "tool_start"
+          ? `正在使用 ${event.name || "工具"}`
+          : event.ok === false
+            ? `${event.name || "工具"} 执行失败`
+            : `${event.name || "工具"} 已返回结果`;
+    collaborationSummary.textContent = `${agentLabel(trackedAgent)} 正在工作`;
+    setAgentCardState(trackedAgent, "active", detail);
+    return;
+  }
+
+  if (type === "assistant" && trackedAgent) {
+    const defaults = AGENT_DELIVERY_DEFAULTS[trackedAgent];
+    recordAgentDelivery(trackedAgent, {
+      title: defaults.title,
+      content: event.content,
+      artifact: defaults.artifact,
+      provisional: true,
+    });
+    setAgentCardState(trackedAgent, "completed", "已提交本阶段工作结果");
+    return;
+  }
+
+  if (type === "error") {
+    if (trackedAgent) {
+      setAgentCardState(trackedAgent, "error", event.message || "执行过程中出现异常");
+    } else if (activeCollaborationAgent) {
+      setAgentCardState(activeCollaborationAgent, "error", event.message || "执行过程中出现异常");
+    }
+    collaborationSummary.textContent = "协作流程遇到异常";
+    return;
+  }
+
+  if (type === "cancelled" || type === "force_stopped") {
+    if (activeCollaborationAgent) {
+      setAgentCardState(activeCollaborationAgent, "error", "任务已被终止");
+    }
+    collaborationSummary.textContent = "协作流程已终止";
+    return;
+  }
+
+  if (type === "done" && !collaborationBoard.classList.contains("hidden")) {
+    const completed = String(event.status || "").toLowerCase() === "completed";
+    if (event.answer) {
+      recordAgentDelivery("orchestrator", {
+        title: completed ? "任务完成，交付最终结果" : "任务结束，交付终态说明",
+        content: event.answer,
+        artifact: completed ? "最终执行结果" : "任务终态说明",
+      });
+    }
+    Object.keys(AGENT_DEFAULT_DETAILS).forEach((role) => {
+      const card = agentCard(role);
+      if (!card || card.classList.contains("error")) return;
+      setAgentCardState(
+        role,
+        completed ? "completed" : "",
+        completed ? "已完成并交付结果" : AGENT_DEFAULT_DETAILS[role],
+      );
+    });
+    collaborationSummary.textContent = completed
+      ? "协作完成，结果已交付"
+      : "协作流程已结束";
+  }
 }
 
 function formatDate(value) {
@@ -112,8 +475,12 @@ function addElement(className, text = "", scroll = true) {
   return element;
 }
 
-function addEventCard(className, tag, title, body = "", scroll = true) {
-  const item = addElement(`event ${className}`.trim(), "", scroll);
+function addEventCard(className, tag, title, body = "", scroll = true, agent = "") {
+  const item = addElement(
+    `event ${className} ${agentClassName(agent)}`.trim(),
+    "",
+    scroll,
+  );
   const head = document.createElement("div");
   head.className = "event-head";
   const tagElement = document.createElement("span");
@@ -144,6 +511,7 @@ function resetRunOverview() {
   finalResult.classList.remove("error");
   resultStatus.textContent = "-";
   resultContent.textContent = "";
+  resetCollaborationBoard();
 }
 
 function updateRunOverview(event) {
@@ -169,9 +537,16 @@ function updateRunOverview(event) {
     classes.push("running");
   } else if (type === "agent_phase") {
     runKicker.textContent = "AGENT PHASE";
-    runTitle.textContent = event.title || "Agent 正在工作";
+    runTitle.textContent = phaseLabel(event.title);
     runSummary.textContent = `${agentLabel(event.agent)} 正在执行当前阶段。`;
-    runPhase.textContent = event.title || agentLabel(event.agent);
+    runPhase.textContent = phaseLabel(event.title) || agentLabel(event.agent);
+    runStatus.textContent = "执行中";
+    classes.push("running");
+  } else if (type === "agent_handoff") {
+    runKicker.textContent = "HANDOFF";
+    runTitle.textContent = `${agentLabel(event.from_agent)} → ${agentLabel(event.to_agent)}`;
+    runSummary.textContent = event.title || "阶段结果正在交接给下一位 Agent。";
+    runPhase.textContent = "任务交接";
     runStatus.textContent = "执行中";
     classes.push("running");
   } else if (type === "step") {
@@ -258,9 +633,11 @@ function finishRunningState() {
 function renderEvent(event, options = {}) {
   const live = options.live !== false;
   const scroll = options.scroll !== false;
+  event = normalizeEvent(event);
   if (!event || !event.type) return;
   if (event.run_id) currentRunId = event.run_id;
   updateRunOverview(event);
+  updateCollaboration(event);
 
   if (event.type === "task") {
     if (lastRenderedTask === event.task) return;
@@ -285,6 +662,7 @@ function renderEvent(event, options = {}) {
       event.mode === "multi-agent" ? "多 Agent 协同" : "单 Agent 执行",
       event.reason || "",
       scroll,
+      "orchestrator",
     );
     return;
   }
@@ -293,10 +671,53 @@ function renderEvent(event, options = {}) {
     addEventCard(
       "agent-phase",
       "AGENT",
-      `${agentLabel(event.agent)} · ${event.title || "工作阶段"}`,
+      `${agentLabel(event.agent)} · ${phaseLabel(event.title)}`,
+      "",
+      scroll,
+      event.agent,
+    );
+    return;
+  }
+
+  if (event.type === "agent_handoff") {
+    const item = addElement(
+      `handoff ${agentClassName(event.from_agent)}`.trim(),
       "",
       scroll,
     );
+    const head = document.createElement("div");
+    head.className = "handoff-head";
+    const tag = document.createElement("span");
+    tag.className = "handoff-tag";
+    tag.textContent = "HANDOFF";
+    const route = document.createElement("strong");
+    route.textContent = `${agentLabel(event.from_agent)} → ${agentLabel(event.to_agent)}`;
+    head.append(tag, route);
+    item.appendChild(head);
+
+    const title = document.createElement("div");
+    title.className = "handoff-title";
+    title.textContent = event.title || "阶段结果交接";
+    item.appendChild(title);
+
+    if (event.artifact) {
+      const artifact = document.createElement("div");
+      artifact.className = "handoff-artifact";
+      artifact.textContent = `交接产物：${event.artifact}`;
+      item.appendChild(artifact);
+    }
+
+    const details = document.createElement("details");
+    details.className = "handoff-details";
+    details.open = true;
+    const summary = document.createElement("summary");
+    summary.textContent = "查看完整交接内容";
+    details.appendChild(summary);
+    const content = document.createElement("div");
+    content.className = "handoff-content";
+    content.textContent = event.content || "本阶段没有附加文字说明。";
+    details.appendChild(content);
+    item.appendChild(details);
     return;
   }
 
@@ -307,6 +728,7 @@ function renderEvent(event, options = {}) {
       `${agentLabel(event.agent)} · 第 ${event.step || "-"} 步`,
       "Agent 正在分析任务并决定下一步操作。",
       scroll,
+      event.agent,
     );
     return;
   }
@@ -318,6 +740,7 @@ function renderEvent(event, options = {}) {
       `${agentLabel(event.agent)} · 等待模型响应`,
       event.message || "",
       scroll,
+      event.agent,
     );
     return;
   }
@@ -332,6 +755,7 @@ function renderEvent(event, options = {}) {
       `${agentLabel(event.agent)} · ${event.name || "未知工具"}`,
       args,
       scroll,
+      event.agent,
     );
     return;
   }
@@ -343,12 +767,13 @@ function renderEvent(event, options = {}) {
       `${agentLabel(event.agent)} · ${event.name || "工具结果"}`,
       event.result || "",
       scroll,
+      event.agent,
     );
     return;
   }
 
   if (event.type === "assistant") {
-    const item = addElement("assistant", "", scroll);
+    const item = addElement(`assistant ${agentClassName(event.agent)}`.trim(), "", scroll);
     item.textContent = event.agent
       ? `[${agentLabel(event.agent)}]\n${event.content || ""}`
       : event.content || "";
@@ -373,6 +798,7 @@ function renderEvent(event, options = {}) {
       `${agentLabel(event.agent)} · 执行失败`,
       event.message || "",
       scroll,
+      event.agent,
     );
     if (live) setRunningState(false);
     return;
@@ -408,6 +834,7 @@ function renderEvent(event, options = {}) {
       `${agentLabel(event.agent)} · 任务已终止`,
       event.message || "任务已被用户终止。",
       scroll,
+      event.agent,
     );
     if (live) finishRunningState();
     return;
@@ -871,6 +1298,15 @@ projectSelect.addEventListener("change", async () => {
 taskInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
     form.requestSubmit();
+  }
+});
+
+bindAgentCardInteractions();
+closeDelivery.addEventListener("click", closeDeliveryModal);
+document.querySelector("[data-close-delivery]").addEventListener("click", closeDeliveryModal);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !deliveryModal.classList.contains("hidden")) {
+    closeDeliveryModal();
   }
 });
 
