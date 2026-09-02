@@ -280,10 +280,12 @@ class WorkspaceTools:
                     "name": "run_playwright_cli",
                     "description": (
                         "Run the Playwright CLI for browser automation and UI "
-                        "self-tests. Use it after starting a local web server. "
-                        "Typical commands: install-browser, open, goto, snapshot, "
-                        "find, click, fill, type, press, screenshot, console, "
-                        "requests, run-code, close, close-all, kill-all."
+                        "smoke tests. Use it after starting a local web server. "
+                        "Prefer one focused critical-path flow instead of "
+                        "exhaustive page and control coverage. Typical commands: "
+                        "install-browser, open, goto, snapshot, find, click, fill, "
+                        "type, press, screenshot, console, requests, run-code, "
+                        "close, close-all, kill-all."
                     ),
                     "parameters": {
                         "type": "object",
